@@ -33,12 +33,3 @@ variable "node_desired_size" {
   type        = number
   default     = 2
 }
-
-variable "tags" {
-  description = "Default tags applied to every resource."
-  type        = map(string)
-  default = {
-    Project = "rapyd-sentinel-poc"
-    Managed = "terraform"
-  }
-}
