@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-west-2
   TF_DIR: terraform
   # Optional: set AWS_ROLE_ARN (repo secret) to use GitHub OIDC instead of static keys.
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
