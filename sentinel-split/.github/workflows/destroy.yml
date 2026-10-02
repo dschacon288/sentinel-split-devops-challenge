@@ -1,0 +1,80 @@
+name: destroy
+
+# Manual only. Requires the S3 state backend (TF_STATE_BUCKET) so Terraform knows what to delete.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to tear everything down'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+
+jobs:
+  destroy:
+    if: github.event.inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS credentials (OIDC)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: AWS credentials (static keys)
+        if: ${{ env.AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - uses: azure/setup-kubectl@v4
+
+      - name: Configure state backend
+        run: |
+          [ -n "$TF_STATE_BUCKET" ] || { echo "TF_STATE_BUCKET is required for destroy"; exit 1; }
+          cat > backend_override.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket       = "$TF_STATE_BUCKET"
+              key          = "sentinel-split/terraform.tfstate"
+              region       = "$AWS_REGION"
+              use_lockfile = true
+            }
+          }
+          EOF
+        working-directory: terraform
+
+      - name: terraform init
+        run: terraform init -input=false
+        working-directory: terraform
+
+      # Load balancers created by Kubernetes Services are not in Terraform state;
+      # delete them first or the VPCs cannot be destroyed.
+      - name: Delete Kubernetes load balancers
+        run: |
+          for c in eks-gateway eks-backend; do
+            aws eks update-kubeconfig --name "$c" --region "$AWS_REGION" --alias "$c" || continue
+            kubectl --context "$c" delete namespace sentinel --ignore-not-found --timeout=300s || true
+          done
+          sleep 60   # give AWS time to release the NLB network interfaces
+
+      - name: terraform destroy
+        run: terraform destroy -input=false -auto-approve
+        working-directory: terraform

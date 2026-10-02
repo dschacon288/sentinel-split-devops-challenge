@@ -1,0 +1,19 @@
+# Public entry point: internet-facing NLB in the public subnets of vpc-gateway.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-proxy
+  namespace: sentinel
+  labels:
+    app: gateway-proxy
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+spec:
+  type: LoadBalancer
+  selector:
+    app: gateway-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

@@ -1,0 +1,230 @@
+name: deploy
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # needed only for the optional GitHub OIDC login
+  contents: read
+
+concurrency:
+  group: sentinel-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: terraform
+  # Optional: set AWS_ROLE_ARN (repo secret) to use GitHub OIDC instead of static keys.
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  # Optional: set TF_STATE_BUCKET (repo variable) to store state in S3.
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+
+jobs:
+  validate:
+    name: Validate & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: terraform init (no backend)
+        run: terraform init -backend=false -input=false
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: terraform validate
+        run: terraform validate
+        working-directory: ${{ env.TF_DIR }}
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Offline manifest validation (kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          for f in k8s/backend/*.yaml k8s/gateway/*.yaml; do
+            sed -e 's#__GATEWAY_CIDR__#10.0.0.0/16#g' -e 's#__BACKEND_HOST__#backend.example.internal#g' "$f" \
+              | ./kubeconform -strict -summary -
+          done
+
+  deploy:
+    name: Terraform plan/apply + deploy workloads
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- AWS credentials: OIDC when a role is configured, static keys otherwise
+      - name: AWS credentials (OIDC)
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: AWS credentials (static keys)
+        if: ${{ env.AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure state backend
+        run: |
+          if [ -n "$TF_STATE_BUCKET" ]; then
+            echo "Using S3 backend: $TF_STATE_BUCKET"
+            cat > backend_override.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket       = "$TF_STATE_BUCKET"
+              key          = "sentinel-split/terraform.tfstate"
+              region       = "$AWS_REGION"
+              use_lockfile = true
+            }
+          }
+          EOF
+          else
+            echo "::warning::TF_STATE_BUCKET not set - using LOCAL state (not persisted between runs)."
+          fi
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: terraform init
+        run: terraform init -input=false
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: terraform plan
+        run: terraform plan -input=false -out=tfplan
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: terraform apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -input=false -auto-approve tfplan
+        working-directory: ${{ env.TF_DIR }}
+
+      # --- Everything below only runs on main, after the infrastructure exists
+      - name: Read Terraform outputs
+        if: github.ref == 'refs/heads/main'
+        id: tf
+        run: |
+          echo "gateway_cluster=$(terraform output -raw gateway_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "backend_cluster=$(terraform output -raw backend_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "gateway_cidr=$(terraform output -raw gateway_vpc_cidr)" >> "$GITHUB_OUTPUT"
+        working-directory: ${{ env.TF_DIR }}
+
+      - name: Install kubectl
+        if: github.ref == 'refs/heads/main'
+        uses: azure/setup-kubectl@v4
+
+      - name: Kubeconfigs for both clusters
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws eks update-kubeconfig --name "${{ steps.tf.outputs.backend_cluster }}" --region "$AWS_REGION" --alias backend
+          aws eks update-kubeconfig --name "${{ steps.tf.outputs.gateway_cluster }}" --region "$AWS_REGION" --alias gateway
+
+      - name: Wait for nodes to be Ready
+        if: github.ref == 'refs/heads/main'
+        run: |
+          for ctx in backend gateway; do
+            kubectl --context "$ctx" wait --for=condition=Ready nodes --all --timeout=600s
+          done
+
+      # ------------------------------------------------------------ Backend
+      - name: Deploy backend (dry-run, then apply)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p rendered/backend
+          for f in k8s/backend/*.yaml; do
+            sed "s#__GATEWAY_CIDR__#${{ steps.tf.outputs.gateway_cidr }}#g" "$f" > "rendered/backend/$(basename "$f")"
+          done
+          kubectl --context backend apply -f rendered/backend/00-namespace.yaml
+          kubectl --context backend apply --dry-run=server -f rendered/backend/
+          kubectl --context backend apply -f rendered/backend/
+          kubectl --context backend -n sentinel rollout status deployment/backend --timeout=300s
+
+      - name: Wait for the internal backend load balancer
+        if: github.ref == 'refs/heads/main'
+        id: backend_lb
+        run: |
+          for i in $(seq 1 40); do
+            host=$(kubectl --context backend -n sentinel get svc backend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$host" ] && break
+            echo "waiting for backend NLB... ($i)"; sleep 15
+          done
+          [ -n "$host" ] || { echo "backend NLB was not provisioned"; exit 1; }
+          echo "Internal backend endpoint: $host"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------ Gateway
+      - name: Deploy gateway proxy (dry-run, then apply)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p rendered/gateway
+          for f in k8s/gateway/*.yaml; do
+            sed "s#__BACKEND_HOST__#${{ steps.backend_lb.outputs.host }}#g" "$f" > "rendered/gateway/$(basename "$f")"
+          done
+          kubectl --context gateway apply -f rendered/gateway/00-namespace.yaml
+          kubectl --context gateway apply --dry-run=server -f rendered/gateway/
+          kubectl --context gateway apply -f rendered/gateway/
+          # Restart so a changed backend hostname is always picked up.
+          kubectl --context gateway -n sentinel rollout restart deployment/gateway-proxy
+          kubectl --context gateway -n sentinel rollout status deployment/gateway-proxy --timeout=300s
+
+      - name: Wait for the public gateway load balancer
+        if: github.ref == 'refs/heads/main'
+        id: gateway_lb
+        run: |
+          for i in $(seq 1 40); do
+            host=$(kubectl --context gateway -n sentinel get svc gateway-proxy -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$host" ] && break
+            echo "waiting for gateway NLB... ($i)"; sleep 15
+          done
+          [ -n "$host" ] || { echo "gateway NLB was not provisioned"; exit 1; }
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------ End-to-end test
+      - name: End-to-end test (public LB -> proxy -> peering -> backend)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          url="http://${{ steps.gateway_lb.outputs.host }}/"
+          echo "Testing $url"
+          for i in $(seq 1 40); do
+            body=$(curl -s --max-time 10 "$url" || true)
+            echo "attempt $i: '$body'"
+            if echo "$body" | grep -q "Hello from backend"; then
+              echo "::notice::E2E OK - proxy in vpc-gateway reached the backend in vpc-backend"
+              {
+                echo "### End-to-end result"
+                echo "- Public URL: \`$url\`"
+                echo "- Response: \`$body\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "E2E test failed"; exit 1
+
+      - name: Negative test - backend NLB is not reachable from the internet
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # The internal NLB resolves to private IPs; from the runner this must time out.
+          if curl -s --max-time 8 "http://${{ steps.backend_lb.outputs.host }}/" | grep -q "Hello from backend"; then
+            echo "Backend is reachable from the internet - this must not happen"; exit 1
+          fi
+          echo "Backend is not reachable from outside the VPCs (expected)."
