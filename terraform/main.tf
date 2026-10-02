@@ -11,8 +11,8 @@ locals {
 module "gateway_network" {
   source = "./modules/networking"
 
-  name         = "vpc-gateway"
-  cluster_name = "eks-gateway"
+  name         = "vpc-chacon-gateway"
+  cluster_name = "eks-chacon-gateway"
   vpc_cidr     = var.gateway_vpc_cidr
   azs          = local.azs
 }
@@ -20,8 +20,8 @@ module "gateway_network" {
 module "backend_network" {
   source = "./modules/networking"
 
-  name         = "vpc-backend"
-  cluster_name = "eks-backend"
+  name         = "vpc-chacon-backend"
+  cluster_name = "eks-chacon-backend"
   vpc_cidr     = var.backend_vpc_cidr
   azs          = local.azs
 }
@@ -31,7 +31,7 @@ module "backend_network" {
 module "gateway_eks" {
   source = "./modules/eks"
 
-  cluster_name       = "eks-gateway"
+  cluster_name       = "eks-chacon-gateway"
   kubernetes_version = var.kubernetes_version
   subnet_ids         = module.gateway_network.private_subnet_ids
   node_instance_type = var.node_instance_type
@@ -41,7 +41,7 @@ module "gateway_eks" {
 module "backend_eks" {
   source = "./modules/eks"
 
-  cluster_name       = "eks-backend"
+  cluster_name       = "eks-chacon-backend"
   kubernetes_version = var.kubernetes_version
   subnet_ids         = module.backend_network.private_subnet_ids
   node_instance_type = var.node_instance_type
@@ -53,8 +53,8 @@ module "backend_eks" {
 module "peering" {
   source = "./modules/peering"
 
-  requester_name = "vpc-gateway"
-  accepter_name  = "vpc-backend"
+  requester_name = "vpc-chacon-gateway"
+  accepter_name  = "vpc-chacon-backend"
 
   requester_vpc_id = module.gateway_network.vpc_id
   accepter_vpc_id  = module.backend_network.vpc_id
