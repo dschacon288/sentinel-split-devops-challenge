@@ -28,7 +28,7 @@ jobs:
         run: |
           set +e
           aws sts assume-role-with-web-identity \
-            --role-arn "arn:aws:iam::721500739616:role/sentinel-chacon-gha" \
+            --role-arn "arn:aws:iam::721500739616:role/sentinel-chacon-gha-v2" \
             --role-session-name oidc-debug \
             --web-identity-token "$(cat /tmp/token)" \
             --duration-seconds 900 \
