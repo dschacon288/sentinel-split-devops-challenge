@@ -1,0 +1,36 @@
+name: oidc-debug
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decode the OIDC claims GitHub actually sends
+        run: |
+          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value' > /tmp/token
+          PAYLOAD=$(cut -d. -f2 /tmp/token)
+          case $((${#PAYLOAD} % 4)) in
+            2) PAYLOAD="${PAYLOAD}==" ;;
+            3) PAYLOAD="${PAYLOAD}=" ;;
+          esac
+          echo "$PAYLOAD" | tr '_-' '/+' | base64 -d \
+            | jq '{iss, aud, sub, repository, repository_owner, ref, workflow_ref}'
+
+      - name: Raw STS call (unmasked AWS error)
+        run: |
+          set +e
+          aws sts assume-role-with-web-identity \
+            --role-arn "arn:aws:iam::721500739616:role/sentinel-chacon-gha" \
+            --role-session-name oidc-debug \
+            --web-identity-token "$(cat /tmp/token)" \
+            --duration-seconds 900 \
+            --region eu-west-2
+          echo "exit code: $?"
