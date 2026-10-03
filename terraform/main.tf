@@ -36,6 +36,7 @@ module "gateway_eks" {
   subnet_ids         = module.gateway_network.private_subnet_ids
   node_instance_type = var.node_instance_type
   node_desired_size  = var.node_desired_size
+  ci_principal_arn = var.ci_principal_arn
 }
 
 module "backend_eks" {
@@ -46,6 +47,7 @@ module "backend_eks" {
   subnet_ids         = module.backend_network.private_subnet_ids
   node_instance_type = var.node_instance_type
   node_desired_size  = var.node_desired_size
+  ci_principal_arn = var.ci_principal_arn
 }
 
 # ------------------------------------------------- Peering, routes, SG rules

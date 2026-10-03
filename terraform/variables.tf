@@ -33,3 +33,8 @@ variable "node_desired_size" {
   type        = number
   default     = 2
 }
+variable "ci_principal_arn" {
+  description = "IAM role ARN used by GitHub Actions. Injected as TF_VAR_ci_principal_arn by the pipeline."
+  type        = string
+  default     = ""
+}

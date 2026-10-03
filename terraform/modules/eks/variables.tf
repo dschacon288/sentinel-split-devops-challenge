@@ -29,3 +29,8 @@ variable "node_desired_size" {
   type        = number
   default     = 2
 }
+variable "ci_principal_arn" {
+  description = "IAM role that runs the pipeline. Gets cluster-admin via an EKS access entry. Empty disables it."
+  type        = string
+  default     = ""
+}

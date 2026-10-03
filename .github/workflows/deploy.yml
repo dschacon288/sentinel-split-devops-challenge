@@ -19,6 +19,7 @@ env:
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
   # Optional: set TF_STATE_BUCKET (repo variable) to store state in S3.
   TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_VAR_ci_principal_arn: ${{ secrets.AWS_ROLE_ARN }}
 
 jobs:
   validate:

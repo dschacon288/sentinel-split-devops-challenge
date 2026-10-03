@@ -101,3 +101,25 @@ resource "aws_eks_node_group" "this" {
     ignore_changes = [scaling_config[0].desired_size]
   }
 }
+
+# The cluster creator gets admin via bootstrap_cluster_creator_admin_permissions,
+# but the CI role is a different principal and needs its own access entry.
+resource "aws_eks_access_entry" "ci" {
+  count         = var.ci_principal_arn == "" ? 0 : 1
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = var.ci_principal_arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "ci" {
+  count         = var.ci_principal_arn == "" ? 0 : 1
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = var.ci_principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.ci]
+}
